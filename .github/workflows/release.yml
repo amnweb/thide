@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Cache target directory
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Build release
+      run: cargo build --release --verbose
+      
+    - name: Get version from Cargo.toml or tag
+      id: get_version
+      run: |
+        if ($env:GITHUB_REF -match 'refs/tags/v(.*)') {
+          # Version from git tag
+          $version = $matches[1]
+          Write-Host "Version from tag: $version"
+        } else {
+          # Version from Cargo.toml (for manual runs)
+          $cargoContent = Get-Content "Cargo.toml" -Raw
+          if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
+            $version = $matches[1]
+            Write-Host "Version from Cargo.toml: $version"
+          } else {
+            $version = "dev-build"
+            Write-Host "Could not determine version, using: $version"
+          }
+        }
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "tag=v$version" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+      
+    - name: Get file size
+      id: get_size
+      run: |
+        $exePath = "target/release/thide.exe"
+        if (-Not (Test-Path $exePath)) {
+          Write-Error "Executable not found at $exePath"
+          exit 1
+        }
+        $size = (Get-Item $exePath).Length
+        $sizeKB = [math]::Round($size / 1KB, 2)
+        echo "size_kb=$sizeKB" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+      
+    - name: Get commit info
+      id: commit_info
+      run: |
+        $commitHash = git rev-parse --short HEAD
+        $commitMsg = git log -1 --pretty=%B
+        $commitDate = git log -1 --pretty=%ci
+        echo "hash=$commitHash" >> $env:GITHUB_OUTPUT
+        echo "date=$commitDate" >> $env:GITHUB_OUTPUT
+        # Escape multiline for GitHub Actions
+        $commitMsg = $commitMsg -replace "`r`n", "%0A" -replace "`n", "%0A"
+        echo "message=$commitMsg" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+      
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get all tags sorted by version
+        $tags = git tag --sort=-version:refname
+        Write-Host "All tags found: $($tags -join ', ')"
+        
+        $currentTag = $tags | Select-Object -First 1
+        $previousTag = $tags | Select-Object -Skip 1 -First 1
+        
+        Write-Host "Current tag: $currentTag"
+        Write-Host "Previous tag: $previousTag"
+        
+        if ($previousTag) {
+          Write-Host "Generating changelog from $previousTag to $currentTag"
+          $changelog = git log "$previousTag..$currentTag" --pretty=format:"- %s (%h)" --no-merges
+          echo "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
+        } else {
+          Write-Host "No previous tag found, showing last 10 commits"
+          $changelog = git log --pretty=format:"- %s (%h)" --no-merges -n 10
+          echo "previous_tag=" >> $env:GITHUB_OUTPUT
+        }
+        
+        # Save to file for multiline output
+        $changelog | Out-File -FilePath "changelog.txt" -Encoding utf8
+        
+        # Use heredoc syntax for multiline output
+        "changes<<EOF" >> $env:GITHUB_OUTPUT
+        Get-Content "changelog.txt" >> $env:GITHUB_OUTPUT
+        "EOF" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+      
+    - name: Create or update git tag
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        $tag = "${{ steps.get_version.outputs.tag }}"
+        Write-Host "Creating/updating tag: $tag"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -f $tag
+        git push origin $tag -f
+      shell: pwsh
+      
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.tag }}
+        files: target/release/thide.exe
+        body: |
+          ## Taskbar Hide v${{ steps.get_version.outputs.version }}
+          
+          **Release Date:** ${{ steps.commit_info.outputs.date }}
+          **Commit:** `${{ steps.commit_info.outputs.hash }}`
+          **Build:** Windows x64
+          **Size:** ${{ steps.get_size.outputs.size_kb }} KB
+           
+          ### 📦 Download
+          
+          - [thide.exe](https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.tag }}/thide.exe)
+          
+          ### 📝 What's Changed
+          
+          ${{ steps.changelog.outputs.changes }}
+    
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Upload artifact (for manual runs)
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/upload-artifact@v4
+      with:
+        name: thide
+        path: target/release/thide.exe
+        retention-days: 7

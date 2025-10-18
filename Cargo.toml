@@ -1,0 +1,39 @@
+[package]
+name = "thide"
+version = "0.1.0"
+edition = "2021"
+authors = ["AmN"]
+description = "A lightweight utility to hide/show Windows taskbar"
+homepage = "https://github.com/amnweb/thide"
+repository = "https://github.com/amnweb/thide"
+license = "MIT"
+
+[[bin]]
+name = "thide"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "s"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Better optimization
+strip = true        # Strip symbols from binary
+panic = "abort"     # Don't include unwinding code
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+] }
+tray-icon = "0.21"
+winit = "0.29"
+ico = "0.4"
+
+[build-dependencies]
+winres = "0.1"
