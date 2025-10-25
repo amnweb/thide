@@ -1,1 +1,12 @@
 /target
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# WiX installer artifacts
+*.wixobj
+*.wixpdb
+target/wix/
