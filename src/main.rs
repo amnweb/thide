@@ -74,7 +74,7 @@ impl TaskbarCache {
     }
 }
 
-// Cache for commonly used UTF-16 strings
+// Cache for commonly used UTF-16 strings (global static cache)
 struct Utf16StringCache {
     shell_tray_wnd: Vec<u16>,
     shell_secondary_tray_wnd: Vec<u16>,
@@ -88,6 +88,12 @@ impl Utf16StringCache {
             shell_secondary_tray_wnd: "Shell_SecondaryTrayWnd\0".encode_utf16().collect(),
             explorer_exe: "explorer.exe".to_string(),
         }
+    }
+
+    fn get() -> &'static Self {
+        use std::sync::OnceLock;
+        static CACHE: OnceLock<Utf16StringCache> = OnceLock::new();
+        CACHE.get_or_init(Self::new)
     }
 }
 
@@ -171,49 +177,45 @@ fn load_icon_file(data: &[u8]) -> Result<tray_icon::Icon, Box<dyn std::error::Er
 
 /// Find all explorer.exe taskbars (primary and secondary monitors) - uncached version
 fn find_all_explorer_taskbars_uncached() -> Vec<HWND> {
-    thread_local! {
-        static STRING_CACHE: Utf16StringCache = Utf16StringCache::new();
-    }
+    let cache = Utf16StringCache::get();
 
     unsafe {
         let mut taskbars = Vec::new();
 
-        STRING_CACHE.with(|cache| {
-            let class_names = [
-                (&cache.shell_tray_wnd, true),
-                (&cache.shell_secondary_tray_wnd, false),
-            ];
+        let class_names = [
+            (&cache.shell_tray_wnd, true),
+            (&cache.shell_secondary_tray_wnd, false),
+        ];
 
-            for (class_wide, is_primary) in &class_names {
-                let mut hwnd = HWND(std::ptr::null_mut());
+        for (class_wide, is_primary) in &class_names {
+            let mut hwnd = HWND(std::ptr::null_mut());
 
-                loop {
-                    match FindWindowExW(
-                        HWND(std::ptr::null_mut()),
-                        hwnd,
-                        windows::core::PCWSTR(class_wide.as_ptr()),
-                        windows::core::PCWSTR::null(),
-                    ) {
-                        Ok(found_hwnd) => {
-                            hwnd = found_hwnd;
-                            if hwnd.0.is_null() {
-                                break;
-                            }
+            loop {
+                match FindWindowExW(
+                    HWND(std::ptr::null_mut()),
+                    hwnd,
+                    windows::core::PCWSTR(class_wide.as_ptr()),
+                    windows::core::PCWSTR::null(),
+                ) {
+                    Ok(found_hwnd) => {
+                        hwnd = found_hwnd;
+                        if hwnd.0.is_null() {
+                            break;
+                        }
 
-                            if let Some(process_name) = get_process_name(hwnd) {
-                                if process_name.eq_ignore_ascii_case(&cache.explorer_exe) {
-                                    taskbars.push(hwnd);
-                                    if *is_primary {
-                                        break; // Only one primary taskbar exists
-                                    }
+                        if let Some(process_name) = get_process_name(hwnd) {
+                            if process_name.eq_ignore_ascii_case(&cache.explorer_exe) {
+                                taskbars.push(hwnd);
+                                if *is_primary {
+                                    break; // Only one primary taskbar exists
                                 }
                             }
                         }
-                        Err(_) => break,
                     }
+                    Err(_) => break,
                 }
             }
-        });
+        }
 
         taskbars
     }
