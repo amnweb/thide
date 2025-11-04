@@ -42,7 +42,7 @@ pub const fn get_message_ids() -> (u32, u32, u32) {
 }
 
 /// Get cached IPC window class name as UTF-16
-fn get_ipc_window_class_utf16() -> &'static [u16] {
+pub fn get_ipc_window_class_utf16() -> &'static [u16] {
     use std::sync::OnceLock;
     static IPC_CLASS_UTF16: OnceLock<Vec<u16>> = OnceLock::new();
     IPC_CLASS_UTF16.get_or_init(|| format!("{}\0", IPC_WINDOW_CLASS).encode_utf16().collect())
