@@ -49,7 +49,8 @@ impl TaskbarCache {
     fn new() -> Self {
         Self {
             handles: Vec::new(),
-            last_updated: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            // Start with expired cache to force initial lookup
+            last_updated: std::time::Instant::now() - std::time::Duration::from_millis(TASKBAR_CACHE_REFRESH_MS * 2),
         }
     }
 
@@ -62,10 +63,13 @@ impl TaskbarCache {
         self.last_updated = std::time::Instant::now();
     }
 
-    fn get(&mut self) -> &[HWND] {
+    fn refresh_if_needed(&mut self) {
         if self.should_refresh() {
             self.update(find_all_explorer_taskbars_uncached());
         }
+    }
+
+    fn handles(&self) -> &[HWND] {
         &self.handles
     }
 }
@@ -74,7 +78,7 @@ impl TaskbarCache {
 struct Utf16StringCache {
     shell_tray_wnd: Vec<u16>,
     shell_secondary_tray_wnd: Vec<u16>,
-    explorer_exe: String, // Kept as String since GetModuleBaseNameW returns UTF-16 that we convert to String
+    explorer_exe: String, // Stored as String for direct comparison with get_process_name() result
 }
 
 impl Utf16StringCache {
@@ -223,9 +227,10 @@ fn find_all_explorer_taskbars() -> Vec<HWND> {
 
 /// Check if any taskbar is currently visible (with caching)
 fn is_taskbar_visible_cached(cache: &mut TaskbarCache) -> bool {
+    cache.refresh_if_needed();
     unsafe {
         cache
-            .get()
+            .handles()
             .iter()
             .any(|&hwnd| IsWindowVisible(hwnd).as_bool())
     }
@@ -243,15 +248,19 @@ fn is_taskbar_visible() -> bool {
 /// Show or hide all taskbars (with optional caching)
 fn set_taskbar_state_cached(show: bool, cache: Option<&mut TaskbarCache>) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
-        let taskbars = if let Some(c) = cache {
-            c.get().to_vec()
-        } else {
-            find_all_explorer_taskbars()
-        };
         let show_cmd = if show { SW_SHOW } else { SW_HIDE };
 
-        for hwnd in taskbars {
-            let _ = ShowWindow(hwnd, show_cmd);
+        if let Some(c) = cache {
+            c.refresh_if_needed();
+            // Use iterator to avoid cloning the Vec
+            for &hwnd in c.handles() {
+                let _ = ShowWindow(hwnd, show_cmd);
+            }
+        } else {
+            // Uncached path for user actions
+            for hwnd in find_all_explorer_taskbars() {
+                let _ = ShowWindow(hwnd, show_cmd);
+            }
         }
 
         Ok(())
