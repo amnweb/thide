@@ -215,7 +215,8 @@ fn find_all_explorer_taskbars_uncached() -> Vec<HWND> {
     }
 }
 
-/// Find all explorer.exe taskbars (primary and secondary monitors) - cached version
+/// Find all explorer.exe taskbars (primary and secondary monitors)
+/// Note: This is the uncached version for cases where fresh handles are required
 fn find_all_explorer_taskbars() -> Vec<HWND> {
     find_all_explorer_taskbars_uncached()
 }
@@ -239,10 +240,14 @@ fn is_taskbar_visible() -> bool {
     }
 }
 
-/// Show or hide all taskbars
-fn set_taskbar_state(show: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// Show or hide all taskbars (with optional caching)
+fn set_taskbar_state_cached(show: bool, cache: Option<&mut TaskbarCache>) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
-        let taskbars = find_all_explorer_taskbars();
+        let taskbars = if let Some(c) = cache {
+            c.get().to_vec()
+        } else {
+            find_all_explorer_taskbars()
+        };
         let show_cmd = if show { SW_SHOW } else { SW_HIDE };
 
         for hwnd in taskbars {
@@ -251,6 +256,11 @@ fn set_taskbar_state(show: bool) -> Result<(), Box<dyn std::error::Error>> {
 
         Ok(())
     }
+}
+
+/// Show or hide all taskbars
+fn set_taskbar_state(show: bool) -> Result<(), Box<dyn std::error::Error>> {
+    set_taskbar_state_cached(show, None)
 }
 
 /// Read the current taskbar AppBar state
@@ -348,13 +358,18 @@ fn check_single_instance() -> Option<HANDLE> {
     }
 }
 
+/// Get cached IPC window class name as UTF-16 (for main.rs usage)
+fn get_ipc_window_class_utf16_main() -> &'static [u16] {
+    use std::sync::OnceLock;
+    static IPC_CLASS_UTF16: OnceLock<Vec<u16>> = OnceLock::new();
+    IPC_CLASS_UTF16.get_or_init(|| format!("{}\0", cli::get_ipc_window_class()).encode_utf16().collect())
+}
+
 /// Create a hidden IPC window for CLI communication
 fn create_ipc_window(event_loop_proxy: EventLoopProxy<IPCMessage>) {
     std::thread::spawn(move || unsafe {
-        // Cache the class name string to avoid repeated UTF-16 conversions
-        let class_name: Vec<u16> = format!("{}\0", cli::get_ipc_window_class())
-            .encode_utf16()
-            .collect();
+        // Use cached UTF-16 string to avoid conversion overhead
+        let class_name = get_ipc_window_class_utf16_main();
 
         let wc = WNDCLASSW {
             lpfnWndProc: Some(ipc_window_proc),
@@ -478,7 +493,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut cache = TaskbarCache::new();
         loop {
             if should_hide_clone.load(Ordering::SeqCst) && is_taskbar_visible_cached(&mut cache) {
-                let _ = set_taskbar_state(false);
+                let _ = set_taskbar_state_cached(false, Some(&mut cache));
             }
             std::thread::sleep(std::time::Duration::from_millis(
                 TASKBAR_MONITOR_INTERVAL_MS,
