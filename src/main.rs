@@ -74,7 +74,7 @@ impl TaskbarCache {
 struct Utf16StringCache {
     shell_tray_wnd: Vec<u16>,
     shell_secondary_tray_wnd: Vec<u16>,
-    explorer_exe: String,
+    explorer_exe: String, // Kept as String since GetModuleBaseNameW returns UTF-16 that we convert to String
 }
 
 impl Utf16StringCache {
@@ -505,6 +505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         elwt.set_control_flow(ControlFlow::Wait);
 
         // Handle IPC messages from CLI
+        // Note: These use uncached handles for accuracy (infrequent user actions)
         if let winit::event::Event::UserEvent(ipc_msg) = event {
             match ipc_msg {
                 IPCMessage::Show => {
@@ -527,6 +528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Handle tray menu events
+        // Note: These use uncached handles for accuracy (infrequent user actions)
         if let Ok(menu_event) = menu_channel.try_recv() {
             let event_id = menu_event.id;
 
