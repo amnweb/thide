@@ -41,10 +41,17 @@ pub const fn get_message_ids() -> (u32, u32, u32) {
     (WM_THIDE_SHOW, WM_THIDE_HIDE, WM_THIDE_QUIT)
 }
 
+/// Get cached IPC window class name as UTF-16
+fn get_ipc_window_class_utf16() -> &'static [u16] {
+    use std::sync::OnceLock;
+    static IPC_CLASS_UTF16: OnceLock<Vec<u16>> = OnceLock::new();
+    IPC_CLASS_UTF16.get_or_init(|| format!("{}\0", IPC_WINDOW_CLASS).encode_utf16().collect())
+}
+
 /// Send an IPC command to the running THide instance
 fn send_command(message: u32, success_msg: &str) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
-        let class_name: Vec<u16> = format!("{}\0", IPC_WINDOW_CLASS).encode_utf16().collect();
+        let class_name = get_ipc_window_class_utf16();
 
         match FindWindowW(
             windows::core::PCWSTR(class_name.as_ptr()),
@@ -66,7 +73,7 @@ fn send_command(message: u32, success_msg: &str) -> Result<(), Box<dyn std::erro
 /// Check if THide is currently running
 fn is_thide_running() -> bool {
     unsafe {
-        let class_name: Vec<u16> = format!("{}\0", IPC_WINDOW_CLASS).encode_utf16().collect();
+        let class_name = get_ipc_window_class_utf16();
 
         matches!(
             FindWindowW(

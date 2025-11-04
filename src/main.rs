@@ -28,7 +28,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 
 // Constants
-const TASKBAR_MONITOR_INTERVAL_MS: u64 = 100;
+const TASKBAR_MONITOR_INTERVAL_MS: u64 = 500; // Reduced from 100ms to 500ms to save CPU cycles
+const TASKBAR_CACHE_REFRESH_MS: u64 = 5000; // Refresh taskbar cache every 5 seconds
 
 // IPC Message Types
 #[derive(Debug, Clone)]
@@ -36,6 +37,54 @@ enum IPCMessage {
     Show,
     Hide,
     Quit,
+}
+
+// Cached taskbar handles with timestamp
+struct TaskbarCache {
+    handles: Vec<HWND>,
+    last_updated: std::time::Instant,
+}
+
+impl TaskbarCache {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+            last_updated: std::time::Instant::now() - std::time::Duration::from_secs(10),
+        }
+    }
+
+    fn should_refresh(&self) -> bool {
+        self.last_updated.elapsed().as_millis() > TASKBAR_CACHE_REFRESH_MS as u128
+    }
+
+    fn update(&mut self, handles: Vec<HWND>) {
+        self.handles = handles;
+        self.last_updated = std::time::Instant::now();
+    }
+
+    fn get(&mut self) -> &[HWND] {
+        if self.should_refresh() {
+            self.update(find_all_explorer_taskbars_uncached());
+        }
+        &self.handles
+    }
+}
+
+// Cache for commonly used UTF-16 strings
+struct Utf16StringCache {
+    shell_tray_wnd: Vec<u16>,
+    shell_secondary_tray_wnd: Vec<u16>,
+    explorer_exe: String,
+}
+
+impl Utf16StringCache {
+    fn new() -> Self {
+        Self {
+            shell_tray_wnd: "Shell_TrayWnd\0".encode_utf16().collect(),
+            shell_secondary_tray_wnd: "Shell_SecondaryTrayWnd\0".encode_utf16().collect(),
+            explorer_exe: "explorer.exe".to_string(),
+        }
+    }
 }
 
 // Global event proxy storage for IPC communication
@@ -116,48 +165,72 @@ fn load_icon_file(data: &[u8]) -> Result<tray_icon::Icon, Box<dyn std::error::Er
     Ok(tray_icon::Icon::from_rgba(rgba, width, height)?)
 }
 
-/// Find all explorer.exe taskbars (primary and secondary monitors)
-fn find_all_explorer_taskbars() -> Vec<HWND> {
+/// Find all explorer.exe taskbars (primary and secondary monitors) - uncached version
+fn find_all_explorer_taskbars_uncached() -> Vec<HWND> {
+    thread_local! {
+        static STRING_CACHE: Utf16StringCache = Utf16StringCache::new();
+    }
+
     unsafe {
         let mut taskbars = Vec::new();
-        let class_names = ["Shell_TrayWnd\0", "Shell_SecondaryTrayWnd\0"];
 
-        for class_name in &class_names {
-            let class_wide: Vec<u16> = class_name.encode_utf16().collect();
-            let mut hwnd = HWND(std::ptr::null_mut());
+        STRING_CACHE.with(|cache| {
+            let class_names = [
+                (&cache.shell_tray_wnd, true),
+                (&cache.shell_secondary_tray_wnd, false),
+            ];
 
-            loop {
-                match FindWindowExW(
-                    HWND(std::ptr::null_mut()),
-                    hwnd,
-                    windows::core::PCWSTR(class_wide.as_ptr()),
-                    windows::core::PCWSTR::null(),
-                ) {
-                    Ok(found_hwnd) => {
-                        hwnd = found_hwnd;
-                        if hwnd.0.is_null() {
-                            break;
-                        }
+            for (class_wide, is_primary) in &class_names {
+                let mut hwnd = HWND(std::ptr::null_mut());
 
-                        if let Some(process_name) = get_process_name(hwnd) {
-                            if process_name.eq_ignore_ascii_case("explorer.exe") {
-                                taskbars.push(hwnd);
-                                if *class_name == "Shell_TrayWnd\0" {
-                                    break; // Only one primary taskbar exists
+                loop {
+                    match FindWindowExW(
+                        HWND(std::ptr::null_mut()),
+                        hwnd,
+                        windows::core::PCWSTR(class_wide.as_ptr()),
+                        windows::core::PCWSTR::null(),
+                    ) {
+                        Ok(found_hwnd) => {
+                            hwnd = found_hwnd;
+                            if hwnd.0.is_null() {
+                                break;
+                            }
+
+                            if let Some(process_name) = get_process_name(hwnd) {
+                                if process_name.eq_ignore_ascii_case(&cache.explorer_exe) {
+                                    taskbars.push(hwnd);
+                                    if *is_primary {
+                                        break; // Only one primary taskbar exists
+                                    }
                                 }
                             }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
             }
-        }
+        });
 
         taskbars
     }
 }
 
-/// Check if any taskbar is currently visible
+/// Find all explorer.exe taskbars (primary and secondary monitors) - cached version
+fn find_all_explorer_taskbars() -> Vec<HWND> {
+    find_all_explorer_taskbars_uncached()
+}
+
+/// Check if any taskbar is currently visible (with caching)
+fn is_taskbar_visible_cached(cache: &mut TaskbarCache) -> bool {
+    unsafe {
+        cache
+            .get()
+            .iter()
+            .any(|&hwnd| IsWindowVisible(hwnd).as_bool())
+    }
+}
+
+/// Check if any taskbar is currently visible (without caching)
 fn is_taskbar_visible() -> bool {
     unsafe {
         find_all_explorer_taskbars()
@@ -238,20 +311,29 @@ impl Drop for TaskbarStateManager {
     }
 }
 
+/// Get cached strings for single instance check
+fn get_singleton_strings() -> (&'static [u16], &'static [u16], &'static [u16]) {
+    use std::sync::OnceLock;
+    static MUTEX_NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    static TITLE: OnceLock<Vec<u16>> = OnceLock::new();
+    static MESSAGE: OnceLock<Vec<u16>> = OnceLock::new();
+
+    (
+        MUTEX_NAME.get_or_init(|| "Global\\TaskbarHideApp_SingleInstance\0".encode_utf16().collect()),
+        TITLE.get_or_init(|| "Taskbar Hide\0".encode_utf16().collect()),
+        MESSAGE.get_or_init(|| "Application is already running!\0".encode_utf16().collect()),
+    )
+}
+
 /// Check if another instance is already running
 fn check_single_instance() -> Option<HANDLE> {
     unsafe {
-        let mutex_name: Vec<u16> = "Global\\TaskbarHideApp_SingleInstance\0"
-            .encode_utf16()
-            .collect();
+        let (mutex_name, title, message) = get_singleton_strings();
 
         let mutex_handle =
             CreateMutexW(None, true, windows::core::PCWSTR(mutex_name.as_ptr())).ok()?;
 
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let title: Vec<u16> = "Taskbar Hide\0".encode_utf16().collect();
-            let message: Vec<u16> = "Application is already running!\0".encode_utf16().collect();
-
             MessageBoxW(
                 HWND(std::ptr::null_mut()),
                 windows::core::PCWSTR(message.as_ptr()),
@@ -269,6 +351,7 @@ fn check_single_instance() -> Option<HANDLE> {
 /// Create a hidden IPC window for CLI communication
 fn create_ipc_window(event_loop_proxy: EventLoopProxy<IPCMessage>) {
     std::thread::spawn(move || unsafe {
+        // Cache the class name string to avoid repeated UTF-16 conversions
         let class_name: Vec<u16> = format!("{}\0", cli::get_ipc_window_class())
             .encode_utf16()
             .collect();
@@ -390,13 +473,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let taskbar_manager_for_loop = Arc::clone(&taskbar_manager);
 
     // Monitor thread: continuously hide taskbar when it becomes visible
-    std::thread::spawn(move || loop {
-        if should_hide_clone.load(Ordering::SeqCst) && is_taskbar_visible() {
-            let _ = set_taskbar_state(false);
+    // Uses caching to reduce expensive window lookups
+    std::thread::spawn(move || {
+        let mut cache = TaskbarCache::new();
+        loop {
+            if should_hide_clone.load(Ordering::SeqCst) && is_taskbar_visible_cached(&mut cache) {
+                let _ = set_taskbar_state(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                TASKBAR_MONITOR_INTERVAL_MS,
+            ));
         }
-        std::thread::sleep(std::time::Duration::from_millis(
-            TASKBAR_MONITOR_INTERVAL_MS,
-        ));
     });
 
     event_loop.run(move |event, elwt| {
