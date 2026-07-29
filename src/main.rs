@@ -12,9 +12,9 @@ use tray_icon::{
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, WPARAM,
 };
-use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA,
@@ -77,19 +77,24 @@ fn get_process_name(hwnd: HWND) -> Option<String> {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
-        let h_process =
-            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+        let h_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
 
         let mut buffer: [u16; 512] = [0; 512];
-        let len = GetModuleBaseNameW(h_process, None, &mut buffer);
+        let mut len: u32 = buffer.len() as u32;
+        QueryFullProcessImageNameW(
+            h_process,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        )
+        .ok()?;
 
         let _ = windows::Win32::Foundation::CloseHandle(h_process);
 
-        if len > 0 {
-            Some(String::from_utf16_lossy(&buffer[..len as usize]))
-        } else {
-            None
-        }
+        let full_path = String::from_utf16_lossy(&buffer[..len as usize]);
+        std::path::Path::new(&full_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
     }
 }
 
@@ -242,7 +247,7 @@ impl Drop for TaskbarStateManager {
 /// Check if another instance is already running
 fn check_single_instance() -> Option<HANDLE> {
     unsafe {
-        let mutex_name: Vec<u16> = "Global\\TaskbarHideApp_SingleInstance\0"
+        let mutex_name: Vec<u16> = "Local\\TaskbarHideApp_SingleInstance\0"
             .encode_utf16()
             .collect();
 

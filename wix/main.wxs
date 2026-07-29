@@ -136,7 +136,7 @@
                         <Shortcut Id="ApplicationStartMenuShortcut"
                                 Name="Taskbar Hide"
                                 Description="A lightweight utility to hide/show Windows taskbar"
-                                Target="[#exe0]"
+                                Target="[Bin]thide.exe"
                                 WorkingDirectory="Bin"/>
                         <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall"/>
                         <RegistryValue Root="HKCU" Key="Software\AmN\thide" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
